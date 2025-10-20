@@ -35,14 +35,24 @@ class SimpleAgentBridge(A2AServer):
         """Handle incoming messages"""
         conversation_id = msg.conversation_id or str(uuid.uuid4())
         
-        # Only handle text content
-        if not isinstance(msg.content, TextContent):
+        # Debug: Print message content type
+        print(f"DEBUG: Message content type: {type(msg.content)}")
+        print(f"DEBUG: Message content: {msg.content}")
+        
+        # Handle different content types
+        if isinstance(msg.content, TextContent):
+            user_text = msg.content.text
+        elif hasattr(msg.content, 'text'):
+            # Handle cases where content has text attribute but isn't TextContent
+            user_text = msg.content.text
+        elif hasattr(msg.content, 'content') and hasattr(msg.content.content, 'text'):
+            # Handle nested content structure
+            user_text = msg.content.content.text
+        else:
             return self._create_response(
                 msg, conversation_id, 
-                "Only text messages supported"
+                f"Unsupported content type: {type(msg.content)}"
             )
-        
-        user_text = msg.content.text
         
         # Check if this is an agent-to-agent message in our simple format
         if user_text.startswith("FROM:") and "TO:" in user_text and "MESSAGE:" in user_text:
