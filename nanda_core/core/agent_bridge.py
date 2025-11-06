@@ -71,9 +71,14 @@ class SimpleAgentBridge(A2AServer):
             else:
                 # Regular message - use agent logic
                 if self.telemetry:
-                    self.telemetry.log_message_received(self.agent_id, conversation_id)
+                    self.telemetry.log_message_received(self.agent_id, conversation_id, message_content=user_text)
                 
                 response = self.agent_logic(user_text, conversation_id)
+                
+                # Log response
+                if self.telemetry:
+                    self.telemetry.log_response(conversation_id, response)
+                
                 return self._create_response(msg, conversation_id, response)
                 
         except Exception as e:
@@ -111,9 +116,18 @@ class SimpleAgentBridge(A2AServer):
             
             # Process the message through our agent logic
             if self.telemetry:
-                self.telemetry.log_message_received(self.agent_id, conversation_id)
+                self.telemetry.log_message_received(
+                    self.agent_id, 
+                    conversation_id,
+                    message_content=message_content,
+                    from_agent_id=from_agent
+                )
             
             response = self.agent_logic(message_content, conversation_id)
+            
+            # Log response
+            if self.telemetry:
+                self.telemetry.log_response(conversation_id, response, to_agent_id=from_agent)
             
             # Send response back
             return self._create_response(
@@ -207,19 +221,28 @@ class SimpleAgentBridge(A2AServer):
                 )
             )
             
-            if self.telemetry:
-                self.telemetry.log_message_sent(target_agent_id, conversation_id)
-            
             # Extract the actual response content from the target agent
             logger.info(f"🔍 [{self.agent_id}] Response type: {type(response)}, has parts: {hasattr(response, 'parts') if response else 'None'}")
+            response_text = ""
             if response:
                 if hasattr(response, 'parts') and response.parts:
                     response_text = response.parts[0].text
                     logger.info(f"✅ [{self.agent_id}] Received response from {target_agent_id}: {response_text[:100]}...")
-                    return f"[{target_agent_id}] {response_text}"
                 else:
-                    logger.info(f"✅ [{self.agent_id}] Response has no parts, full response: {str(response)[:200]}...")
-                    return f"[{target_agent_id}] {str(response)}"
+                    response_text = str(response)
+                    logger.info(f"✅ [{self.agent_id}] Response has no parts, full response: {response_text[:200]}...")
+            
+            # Log message sent with content and response
+            if self.telemetry:
+                self.telemetry.log_message_sent(
+                    target_agent_id, 
+                    conversation_id,
+                    message_content=message_text,
+                    response_content=response_text if response_text else None
+                )
+            
+            if response_text:
+                return f"[{target_agent_id}] {response_text}"
             else:
                 logger.info(f"✅ [{self.agent_id}] Message delivered to {target_agent_id}, no response")
                 return f"Message sent to {target_agent_id}: {message_text}"

@@ -74,11 +74,13 @@ class TelemetrySystem:
 
     def log_event(self, event_type: str, event_name: str, data: Dict[str, Any] = None):
         """Log a telemetry event"""
+        event_data = data or {}
+        event_data["event_name"] = event_name  # Store event_name in data for retrieval
         event = TelemetryEvent(
             timestamp=datetime.now().isoformat(),
             event_type=event_type,
             agent_id=self.agent_id,
-            data=data or {},
+            data=event_data,
             session_id=self.session_id
         )
 
@@ -89,21 +91,43 @@ class TelemetrySystem:
         # Write to disk asynchronously
         self._write_event_to_disk(event)
 
-    def log_message_received(self, agent_id: str, conversation_id: str, message_type: str = "text"):
+    def log_message_received(self, agent_id: str, conversation_id: str, message_type: str = "text", 
+                            message_content: Optional[str] = None, from_agent_id: Optional[str] = None):
         """Log when a message is received"""
-        self.log_event("message", "received", {
+        data = {
             "conversation_id": conversation_id,
             "message_type": message_type,
             "target_agent": agent_id
-        })
+        }
+        if message_content is not None:
+            data["message_content"] = message_content
+        if from_agent_id is not None:
+            data["from_agent_id"] = from_agent_id
+        self.log_event("message", "received", data)
 
-    def log_message_sent(self, target_agent_id: str, conversation_id: str, success: bool = True):
+    def log_message_sent(self, target_agent_id: str, conversation_id: str, success: bool = True,
+                        message_content: Optional[str] = None, response_content: Optional[str] = None):
         """Log when a message is sent to another agent"""
-        self.log_event("message", "sent", {
+        data = {
             "target_agent_id": target_agent_id,
             "conversation_id": conversation_id,
             "success": success
-        })
+        }
+        if message_content is not None:
+            data["message_content"] = message_content
+        if response_content is not None:
+            data["response_content"] = response_content
+        self.log_event("message", "sent", data)
+
+    def log_response(self, conversation_id: str, response_content: str, to_agent_id: Optional[str] = None):
+        """Log agent response"""
+        data = {
+            "conversation_id": conversation_id,
+            "response_content": response_content
+        }
+        if to_agent_id is not None:
+            data["to_agent_id"] = to_agent_id
+        self.log_event("message", "response", data)
 
     def log_mcp_query(self, server_name: str, query: str, success: bool = True, response_time: float = None):
         """Log MCP server queries"""
@@ -252,6 +276,126 @@ class TelemetrySystem:
             return self._metrics_to_csv(metrics)
         else:
             return str(metrics)
+
+    def export_a2a_logs(
+        self,
+        conversation_id: Optional[str] = None,
+        time_window_hours: int = 24,
+        format: str = "json"
+    ) -> Dict[str, Any]:
+        """
+        Export A2A communication logs for analysis.
+        
+        Args:
+            conversation_id: Optional - filter by conversation
+            time_window_hours: How far back to look
+            format: "json" or "conversation" (structured conversation format)
+        
+        Returns:
+            Dictionary with A2A logs
+        """
+        cutoff_time = datetime.now() - timedelta(hours=time_window_hours)
+        
+        with self.lock:
+            # Filter events
+            if conversation_id:
+                relevant_events = [
+                    e for e in self.event_queue
+                    if (e.event_type == "message" and 
+                        e.data.get("conversation_id") == conversation_id and
+                        datetime.fromisoformat(e.timestamp) > cutoff_time)
+                ]
+            else:
+                relevant_events = [
+                    e for e in self.event_queue
+                    if (e.event_type == "message" and
+                        datetime.fromisoformat(e.timestamp) > cutoff_time)
+                ]
+        
+        if format == "conversation":
+            # Group by conversation_id and create structured format
+            conversations = {}
+            for event in relevant_events:
+                conv_id = event.data.get("conversation_id", "unknown")
+                if conv_id not in conversations:
+                    conversations[conv_id] = {
+                        "conversation_id": conv_id,
+                        "messages": []
+                    }
+                
+                # Add message to conversation
+                event_name = event.data.get("event_name", "")
+                if event_name == "received":
+                    conversations[conv_id]["messages"].append({
+                        "type": "received",
+                        "timestamp": event.timestamp,
+                        "from_agent": event.data.get("from_agent_id"),
+                        "content": event.data.get("message_content"),
+                    })
+                elif event_name == "sent":
+                    conversations[conv_id]["messages"].append({
+                        "type": "sent",
+                        "timestamp": event.timestamp,
+                        "to_agent": event.data.get("target_agent_id"),
+                        "content": event.data.get("message_content"),
+                        "response": event.data.get("response_content"),
+                    })
+                elif event_name == "response":
+                    conversations[conv_id]["messages"].append({
+                        "type": "response",
+                        "timestamp": event.timestamp,
+                        "to_agent": event.data.get("to_agent_id"),
+                        "content": event.data.get("response_content"),
+                    })
+            
+            return {
+                "agent_id": self.agent_id,
+                "conversations": list(conversations.values()),
+                "total_messages": len(relevant_events)
+            }
+        else:
+            # JSON format - return raw events
+            return {
+                "agent_id": self.agent_id,
+                "events": [asdict(e) for e in relevant_events],
+                "total_events": len(relevant_events)
+            }
+
+    def get_conversation_logs(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all messages for a specific conversation in chronological order.
+        Useful for stress testing analysis.
+        
+        Args:
+            conversation_id: Conversation ID to retrieve logs for
+        
+        Returns:
+            List of message dictionaries with timestamp, type, from_agent, to_agent, content, response
+        """
+        with self.lock:
+            events = [
+                e for e in self.event_queue
+                if (e.event_type == "message" and 
+                    e.data.get("conversation_id") == conversation_id)
+            ]
+        
+        # Sort by timestamp
+        events.sort(key=lambda x: x.timestamp)
+        
+        # Format as conversation
+        conversation = []
+        for event in events:
+            event_name = event.data.get("event_name", "")
+            conversation.append({
+                "timestamp": event.timestamp,
+                "type": event_name,  # "received", "sent", "response"
+                "from_agent": event.data.get("from_agent_id"),
+                "to_agent": event.data.get("target_agent_id") or event.data.get("to_agent_id"),
+                "content": event.data.get("message_content") or event.data.get("response_content"),
+                "response": event.data.get("response_content")  # Only for "sent" type
+            })
+        
+        return conversation
 
     def get_health_status(self) -> Dict[str, Any]:
         """Get current health status"""
